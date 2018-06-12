@@ -1,4 +1,4 @@
-function [Ain, Cin, b_in, f_in, center, res] = greedyROI(Y, K, params)
+function [Ain, Cin, b_in, f_in, center, res] = greedyROI(Y, K, params, ROI_list)
 % component initialization using a greedy algorithm to identify neurons in 2d or 3d calcium imaging movies
 %
 % Usage:     [Ain, Cin, bin, fin, center, res] = greedyROI2d(data, K, params)
@@ -15,16 +15,27 @@ function [Ain, Cin, b_in, f_in, center, res] = greedyROI(Y, K, params)
 %            params.windowSiz: size of spatial window when computing the median (default 32 x 32)
 %            params.chunkSiz: number of timesteps to be processed simultaneously if on save_memory mode (default: 100)
 %            params.med_app: number of timesteps to be interleaved for fast (approximate) median calculation (default: 1, no approximation)
+%            params.rolling_sum: flag for using rolling sum to detect new components (default: True)
+%            params.rolling_length: length of rolling window (default: 100)
+% ROI_list   Kn x 2 (or 3) matrix with user specified centroids. If this are present, then the algorithm only finds components around these centroids
 
 %Output:
 % Ain        (d) x K matrix, location of each neuron
 % Cin        T x K matrix, calcium activity of each neuron
-% center     K x 2 matrix, inferred center of each neuron
+% center     K x 2 (or 3) matrix, inferred center of each neuron
 % bin        (d) X nb matrix, initialization of spatial background
 % fin        nb X T matrix, initalization of temporal background
 % res        d1 x d2 x (d3 x) T movie, residual
 %
-% Author: Yuanjun Gao with modifications from Eftychios A. Pnevmatikakis
+% Author: Yuanjun Gao with modifications from Eftychios A. Pnevmatikakis and Weijian Yang
+
+use_sum = false;
+if nargin < 4 || isempty(ROI_list)
+    user_ROIs = 0;
+else
+    user_ROIs = 1;
+    K = size(ROI_list,1);
+end
 
 dimY = ndims(Y) - 1;  % dimensionality of imaged data (2d or 3d)
 sizY = size(Y);
@@ -45,12 +56,27 @@ elseif length(params.gSig) == 1, params.gSig = params.gSig + zeros(1,dimY);
     if dimY == 3; params.gSig(3) = params.gSig(3)/2; end
 end
 
-if ~isfield(params, 'gSiz') || isempty(params.gSiz); params.gSiz = ceil(2*params.gSig + 1);
+if ~isfield(params, 'gSiz') || isempty(params.gSiz); 
+    if ~iscell(params.gSig)
+        params.gSiz = ceil(2*params.gSig + 1);
+    else
+        for j = 1:length(params.gSig)
+            params.gSiz{j,1} = 2*params.gSig{j}+1; %cellfun(@times,params.gSig{j},num2cell(ones(size(params.gSig{j}))*2));
+        end
+    end
 elseif length(params.gSiz) == 1, params.gSiz = params.gSiz + zeros(1,dimY);
     if dimY == 3; params.gSiz(3) = ceil(params.gSiz(3)/2); end
 end
 
-if isfield(params,'ssub'); params.gSig(1:2) = params.gSig(1:2)/params.ssub; params.gSiz(1:2) = ceil(params.gSiz(1:2)/params.ssub); end
+if isfield(params,'ssub'); 
+    if ~iscell(params.gSig); params.gSig(1:2) = params.gSig(1:2)/params.ssub; params.gSiz(1:2) = ceil(params.gSiz(1:2)/params.ssub); 
+    else
+        for j = 1:length(params.gSig)
+            params.gSig{j,1} = params.gSig{j}/params.ssub; %cellfun(@times,params.gSig{j},num2cell(ones(size(params.gSig{j}))/params.ssub));
+            params.gSiz{j,1} = params.gSiz{j}/params.ssub; %cellfun(@times,params.gSiz{j},num2cell(ones(size(params.gSiz{j}))/params.ssub));
+        end
+    end
+end
 
 if ~isfield(params,'nb'), nb = 1; else nb = params.nb; end
 
@@ -60,14 +86,11 @@ else nIter = params.nIter; end
 if ~isfield(params, 'save_memory'), save_memory = 0;
 else save_memory = params.save_memory; end
     
-if ~isfield(params, 'chunkSiz'), chunkSiz = 100;
-else chunkSiz = params.chunkSiz; end
+if ~isfield(params, 'chunkSiz'), chunkSiz = 100; else chunkSiz = params.chunkSiz; end
+if ~isfield(params, 'windowSiz'), windowSiz = 32; else windowSiz = params.windowSiz; end
+if ~isfield(params, 'med_app'), med_app = 1; else med_app = params.med_app; end
 
-if ~isfield(params, 'windowSiz'), windowSiz = 32;
-else windowSiz = params.windowSiz; end
-
-if ~isfield(params, 'med_app'), med_app = 1;
-else med_app = params.med_app; end
+if ~isfield(params,'rem_prct') || isempty(params.rem_prct); params.rem_prct = 20; end
 
 Tint = 1:med_app:T;
 % if save_memory
@@ -80,7 +103,9 @@ Tint = 1:med_app:T;
 %         end
 %     end 
 % else
-if dimY == 2; med = median(Y(:,:,Tint), 3); else med = median(Y(:,:,:,Tint), 4); end
+%if dimY == 2; med = median(Y(:,:,Tint), 3); else med = median(Y(:,:,:,Tint), 4); end
+if dimY == 2; med = prctile(Y(:,:,Tint),params.rem_prct, 3); else med = prctile(Y(:,:,:,Tint),params.rem_prct,4); end
+
 % end
 
 Y = bsxfun(@minus, Y, med);
@@ -92,7 +117,11 @@ if length(K) > 1  % order size of components to be found in descending order
     params.gSiz = params.gSiz(ord,:);
 end
 
-Ain = spalloc(d,sum(K),K(:)'*ceil(prod(params.gSiz))); %zeros(M*N,sum(K));
+if ~iscell(params.gSiz)
+    Ain = spalloc(d,sum(K),K(:)'*ceil(params.gSiz(:,1).^2)); %zeros(M*N,sum(K));
+else
+    Ain = sparse(d,sum(K));
+end
 Cin = zeros(sum(K),T);
 center = zeros(sum(K),dimY);
 
@@ -111,15 +140,26 @@ for r = 1:length(K)
 
     %scan the whole image (only need to do this at the first iteration)
     rho = imblur(Y, gSig, gSiz, dimY, save_memory, chunkSiz); %covariance of data and basis
-    v = sum(rho.^2, dimY+1); %variance explained
-
+    
+    if ~params.rolling_sum
+        v = sum(rho.^2, dimY+1); %variance explained
+    else
+        % running maximum
+        avg_fil = ones(1,params.rolling_length)/params.rolling_length;
+        rho_s = filter(avg_fil,1,rho.^2,[],dimY+1);
+        v = max(rho_s,[],dimY+1);
+    end
+    
     for k = 1:K(r),    
-        [~, ind] = max(v(:));
-        %[iHat, jHat] = ind2sub([M, N], ind);
-        iHat = zeros(1,dimY);
-        if dimY == 2; [iHat(1),iHat(2)] = ind2sub(dx,ind); else [iHat(1),iHat(2),iHat(3)] = ind2sub(dx,ind); end 
-        %centers(k, 1) = iHat; centers(k, 2) = jHat;
-        centers(k,:) = iHat;
+        if user_ROIs
+            iHat = ROI_list(k,:);
+        else
+            [~, ind] = max(v(:));
+            %[iHat, jHat] = ind2sub([M, N], ind);
+            iHat = zeros(1,dimY);
+            if dimY == 2; [iHat(1),iHat(2)] = ind2sub(dx,ind); else [iHat(1),iHat(2),iHat(3)] = ind2sub(dx,ind); end 
+        end
+        centers(k,:) = round(iHat);
 
         %iSig = [max(iHat - gHalf(1), 1), min(iHat + gHalf(1), M)]; iSigLen = iSig(2) - iSig(1) + 1;
         %jSig = [max(jHat - gHalf(2), 1), min(jHat + gHalf(2), N)]; jSigLen = jSig(2) - jSig(1) + 1;
@@ -173,13 +213,21 @@ for r = 1:length(K)
             if dimY == 2
                 rhoTemp = rho(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), :)  - rhoTemp;
                 rho(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), :)  = rhoTemp;
-                %rhoTemp = rho(iMod(1):iMod(2), jMod(1):jMod(2), :) - rhoTemp;
-                %rho(iMod(1):iMod(2), jMod(1):jMod(2), :) = rhoTemp;
-                v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2)) = sum(rhoTemp.^2, 3);
+                if ~params.rolling_sum
+                    v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2)) = sum(rhoTemp.^2, 3);
+                else
+                    rho_filt = filter(avg_fil,1,rhoTemp.^2,[],3);
+                    v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2)) = max(rho_filt,[],3);
+                end
             else
                 rhoTemp = rho(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), iMod(3,1):iMod(3,2), :)  - rhoTemp;
                 rho(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), iMod(3,1):iMod(3,2), :)  = rhoTemp;
-                v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), iMod(3,1):iMod(3,2)) = sum(rhoTemp.^2, 4);
+                if ~params.rolling_sum
+                    v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), iMod(3,1):iMod(3,2)) = sum(rhoTemp.^2, 4);
+                else
+                    rho_filt = filter(avg_fil,1,rhoTemp.^2,[],4);
+                    v(iMod(1,1):iMod(1,2), iMod(2,1):iMod(2,2), iMod(3,1):iMod(3,2)) = max(rho_filt,[],4);
+                end
             end
         end
     end
@@ -188,7 +236,18 @@ for r = 1:length(K)
     center(sum(K(1:r-1))+1:sum(K(1:r)),:) = centers;
 end
 res = reshape(Y,d,T) + repmat(med(:),1,T);
-[b_in,f_in] = nnmf(max(res,0),nb);
+
+%% clear data matrix from local memory (avoid out-of-memory? see greedyROI_corr.m)
+clear Y
+
+%[b_in,f_in] = nnmf(max(res,0),nb);
+%[b_in,f_in] = nnsvd(max(res,0),nb);
+f_in = [mean(res);rand(nb-1,T)];
+
+for nmfiter = 1:100
+    b_in = max((res*f_in')/(f_in*f_in'),0);    
+    f_in = max((b_in'*b_in)\(b_in'*res),0);
+end
 
 
 function [ain,cin] = finetune(data,cin,nIter)

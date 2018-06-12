@@ -1,5 +1,7 @@
 %%
 function plot_components_GUI(Y,A,C,b,f,Cn,options)
+
+memmaped = isobject(Y);
 defoptions = CNMFSetParms;
 if nargin < 7 || isempty(options); options = []; end
 if ~isfield(options,'d1') || isempty(options.d1); d1 = input('What is the total number of rows? \n'); else d1 = options.d1; end          % # of rows
@@ -14,35 +16,38 @@ if ~isfield(options,'save_avi') || isempty(options.save_avi); options.save_avi =
 save_avi = options.save_avi;
 if ~isfield(options,'sx') || isempty(options.sx); options.sx = defoptions.sx; end
 sx = min([options.sx,floor(d1/2),floor(d2/2)]);
-%if ~isfield(options,'pause_time') || isempty(options.pause_time); options.pause_time = defoptions.pause_time; end
-%pause_time = options.pause_time;
-if isfield(options,'name') && ~isempty(options.name);
+if isfield(options,'name') && ~isempty(options.name)
     name = [options.name,'_components'];
 else
     name = [defoptions.name,'_components'];
 end
-
+if ~isfield(options,'full_A') || isempty(options.full_A); full_A = defoptions.full_A; else full_A = options.full_A; end
+if ~memmaped; Y = double(Y); end
 T = size(C,2);
 if ndims(Y) == 3
     Y = reshape(Y,d1*d2,T);
 end
-if nargin < 6 || isempty(Cn);
+if nargin < 6 || isempty(Cn)
     Cn = reshape(mean(Y,2),d1,d2);
 end
-
-nA = sqrt(sum(A.^2))';
+b = double(b);
+C = double(C);
+f = double(f);
+nA = full(sqrt(sum(A.^2))');
 [K,~] = size(C);
 A = A/spdiags(nA,0,K,K);    % normalize spatial components to unit energy
-C = spdiags(nA,0,K,K)*C;
+C = bsxfun(@times,C,nA(:)); %spdiags(nA,0,K,K)*C;
 
 nr = size(A,2);     % number of ROIs
 nb = size(f,1);     % number of background components
 %nA = full(sum(A.^2))';  % energy of each row
 %Y_r = spdiags(nA,0,nr,nr)\(A'*Y- (A'*A)*C - (A'*full(b))*f) + C; 
-Y_r = (A'*Y- (A'*A)*C - (A'*full(b))*f) + C;
+
+AY = mm_fun(A,Y);
+Y_r = (AY- (A'*A)*C - full(A'*double(b))*f) + C;
 
 if plot_df
-    [~,Df] = extract_DF_F(Y,[A,b],[C;f],[],size(A,2)+1);
+    [~,Df] = extract_DF_F(Y,A,C,[],options,AY);
 else
     Df = ones(size(A,2)+1,1);
 end
@@ -52,18 +57,13 @@ if save_avi
     set(vidObj,'FrameRate',1);
     open(vidObj);
 end
-thr = 0.9;
+thr = 0.95;
 fig = figure('Visible','off');
 set(gcf,'Position',2*[300,300,960,480]);
 set(gcf,'PaperPosition',2*[300,300,960,480]);
 int_x = zeros(nr,2*sx);
 int_y = zeros(nr,2*sx);
 cm = com(A,d1,d2);
-
-
-
-
-
 
 
 
@@ -165,26 +165,6 @@ plot_component(1)
             set(leg,'FontSize',14,'FontWeight','bold');
             drawnow;
             hold off;
-            if make_gif
-%                 frame = getframe(fig); %getframe(1);
-%                 im = frame2im(frame);
-%                 [imind,clm] = rgb2ind(im,256);
-%                 if i == 1;
-%                     imwrite(imind,clm,[name,'.gif'],'gif', 'Loopcount',inf);
-%                 else
-%                     imwrite(imind,clm,[name,'.gif'],'gif','WriteMode','append');
-%                 end
-            else
-%                 if i < nr+nb && ~save_avi
-%                     fprintf('component %i. Press any key to continue.. \n', i);
-%                     if pause_time == Inf;
-%                         pause;
-%                     else
-%                         pause(pause_time);
-%                     end
-
-%                 end
-            end
         else
             plot(1:T,f(i-nr,:)); title('Background activity','fontsize',16,'fontweight','bold');
             drawnow;
@@ -192,19 +172,12 @@ plot_component(1)
                 frame = getframe(fig); %getframe(1);
                 im = frame2im(frame);
                 [imind,clm] = rgb2ind(im,256);
-                if i == 1;
+                if i == 1
                     imwrite(imind,clm,[name,'.gif'],'gif', 'Loopcount',inf);
                 else
                     imwrite(imind,clm,[name,'.gif'],'gif','WriteMode','append');
                 end
-            else
-%                 if i < nr+nb && ~save_avi
-%                     fprintf('background component %i. Press any key to continue.. \n', i-nr);
-% %                     if pause_time == Inf;
-% %                         pause;
-% %                     else
-% %                         pause(pause_time);%                     end
-%                 end
+
             end
         end 
     end

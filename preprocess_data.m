@@ -1,23 +1,40 @@
 function [P,Y] = preprocess_data(Y,p,options)
-
-% data pre-processing for:
-% (i)   identifying and interpolating missing entries (assumed to have the
-%       value NaN). Interpolated entries are passed back to Y.
-% (ii)  identifying saturated pixels
-% (iii) estimating noise level for every pixel
-% (iv)  estimating global discrete time constants (if needed)
-% This function replaces arpfit, present in the previous versions of the code.
+% PREPROCESS_DATA - Preprocess data for CNMF analysis of image signals
+%
+%   [P_PARMS,Y] = PREPROCESS_DATA(Y, P_ORDER, OPTIONS)
+%  
+% Inputs:
+%    Y - the image data to be examined
+%    P_ORDER - The order of the autoregressive system
+%    OPTIONS - A structure of options (see help CNMFSetParms)
+%
+% Outputs:
+%    P_PARMS - A structure of parameters extracted from the pre-processed data
+%    P_PARMS has the following fields:
+%
+%       Fieldname:                       | Description
+%       --------------------------------------------------------------------------
+%       p                                |  P_ORDER as above
+%       mis_data                         |  Index locations of missing (NaN) values in Y
+%       mis_values                       |  Interpolated values at the missing index locations
+%       pixels                           |  Index values of pixels that are not saturated
+%       sn                               |  Noise power of each pixel
+%       g                                |  Autoregressive model parameters
+%       
+%    Y - A processed version of the data Y with the following changes:
+%      (i)   identifying and interpolating missing entries (assumed to have the
+%            value NaN). Interpolated entries are passed back to Y.
+%      (ii)  identifying saturated pixels
+%      (iii) estimating noise level for every pixel
+%      (iv)  estimating global discrete time constants (if needed)
+%  
+% This function replaces ARPFIT, present in the previous versions of the code.
+%
 
 % Author: Eftychios A. Pnevmatikakis
 %           Simons Foundation, 2015
 
-defoptions.noise_range = [0.25,0.5];            % frequency range over which to estimate the noise
-defoptions.noise_method = 'logmexp';            % method for which to estimate the noise level
-defoptions.block_size = [64,64];
-defoptions.flag_g = false;                          % compute global AR coefficients
-defoptions.lags = 5;                                 % number of extra lags when computing the AR coefficients
-defoptions.include_noise = 0;                        % include early lags when computing AR coefs
-defoptions.split_data = 0;                         % split data into patches for memory reasons
+defoptions = CNMFSetParms;
 
 if nargin < 3 || isempty(options); options = defoptions; end
 if nargin < 2 || isempty(p); p = 2; end
@@ -30,6 +47,10 @@ if ~isfield(options,'flag_g'); options.flag_g = defoptions.flag_g; end
 if ~isfield(options,'lags'); options.lags = defoptions.lags; end
 if ~isfield(options,'include_noise'); options.include_noise = defoptions.include_noise; end; include_noise = options.include_noise;
 if ~isfield(options,'split_data'); split_data = defoptions.split_data; else split_data = options.split_data; end
+if ~isfield(options,'cluster_pixels'); cluster_pixels = defoptions.cluster_pixels; else cluster_pixels = options.cluster_pixels; end
+if ~isfield(options,'extract_max'); extract_max = defoptions.extract_max; else extract_max = options.extract_max; end
+if ~isfield(options,'max_nlocs'); options.max_nlocs = defoptions.max_nlocs; end
+if ~isfield(options,'max_width'); options.max_width = defoptions.max_width; end
 
 %% interpolate missing data
 
@@ -56,27 +77,48 @@ P.sn = sn(:);
 fprintf('  done \n');
 
 %% cluster pixels based on PSD
+if cluster_pixels
+    psdx = sqrt(psx(:,3:end-1));
+    X = psdx(:,1:min(size(psdx,2),1500));
+    P.psdx = X;
+    X = bsxfun(@minus,X,mean(X,2));     % center
+    X = bsxfun(@times,X,1./sqrt(mean(X.^2,2)));
+    [L,Cx] = kmeans_pp(X',2);
+    [~,ind] = min(sum(Cx(max(1,end-49):end,:),1));
+    P.active_pixels = (L==ind);
+    P.centroids = Cx;
 
-psdx = sqrt(psx(:,3:end));
-X = psdx(:,1:min(size(psdx,2),1500));
-X = bsxfun(@minus,X,mean(X,2));     % center
-X = spdiags(std(X,[],2)+1e-5,0,size(X,1),size(X,1))\X;
-[L,Cx] = kmeans_pp(X',2);
-[~,ind] = min(sum(Cx(end-49:end,:),1));
-P.active_pixels = (L==ind);
-P.centroids = Cx;
-P.psdx = psdx;
+    if (0) % not necessary at the moment
+        %[P.W,P.H] = nnmf(psdx,2); %,'h0',H0);
+        psdx = psdx(:,1:min(size(psdx,2),600));
+        r = sort(rand(1,size(psdx,2)),'descend');
+        er = ones(1,length(r))/sqrt(length(r));
+        H = [r/norm(r); er];
+        W_ = rand(size(psdx,1),2);
+        for iter = 1:100
+            W = max((H*H')\(H*psdx'),0)';
+            %H = max((W'*W)\(W'*psdx),0);
+            r = max((W(:,1)'*psdx - (W(:,1)'*W(:,2))*er)/norm(W(:,1))^2,0);
+            H = [r/norm(r); er];
+            if norm(W-W_,'fro')/norm(W_,'fro') < 1e-3
+                break;
+            else
+                W_ = W;
+            end
+        end
+        disp(iter)
+        W = max((H*H')\(H*psdx'),0)';
+        P.W = W;
+        P.H = H;
+    end
+end
 
-% [P.W,P.H] = nnmf(sqrt(psdx(:,3:end)),2); %,'h0',H0);
-% r = sort(rand(1,size(psdx,2)-2),'descend');
-% H = [r/norm(r); ones(1,length(r))/sqrt(length(r))];
-% for iter = 1:100
-%     W = max((H*H')\(H*psdx'),0)';
-%     H = max((W'*W)\(W'*psdx),0);
-% end
-% P.W = W;
-% P.H = H;
-
+%% extract maximum activity for each pixel
+if extract_max
+    [LOCS,Ym] = extract_max_activity(Y,options.max_nlocs,options.max_width);
+    P.max_locs = LOCS;
+    P.max_data = Ym;
+end
 %% estimate global time constants
 
 if options.flag_g
